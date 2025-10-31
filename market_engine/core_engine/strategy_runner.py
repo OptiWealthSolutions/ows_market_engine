@@ -1,54 +1,91 @@
-# core_engine/strategy_runner.py (concept)
+import json
 import redis
-from config.settings import settings
-from strategies.strategy_base import StrategyBase
-# Importer dynamiquement les classes de stratégies
-from strategies.rsi_revert import RSIRevertStrategy 
-from strategies.ma_crossover import MACrossoverStrategy
+from typing import Dict, List
+from config.settings import SETTINGS
+from strategies.strategy_base import StrategyBase, Signal
+# Importez ici vos classes de stratégie concrètes
+# Exemple (assurez-vous de les avoir créées dans strategies/)
+# from strategies.rsi_revert import RSIRevertStrategy 
+# from strategies.ma_crossover import MACrossoverStrategy 
+
+REDIS_CLIENT = redis.Redis(host=SETTINGS.redis_host, port=SETTINGS.redis_port)
+TICKS_STREAM = "ticks_stream"
+SIGNALS_STREAM = "signals_stream"
+
+# Mappage pour importer dynamiquement les classes
+STRATEGY_MAP = {
+    "rsi_mean_revert": StrategyBase, # Remplacer par RSIRevertStrategy
+    "ma_crossover": StrategyBase,    # Remplacer par MACrossoverStrategy
+}
 
 class StrategyRunner:
     def __init__(self):
-        self.redis = redis.Redis(...)
-        self.strategies = []
+        self.strategies: List[StrategyBase] = []
         self._load_strategies()
 
     def _load_strategies(self):
-        # Charge les stratégies ACTIVÉES depuis la config
-        strategy_map = {
-            "rsi_mean_revert": RSIRevertStrategy,
-            "ma_crossover": MACrossoverStrategy,
-        }
-        
-        for s_config in settings.strategies:
+        """Charge toutes les stratégies activées depuis la configuration."""
+        for s_config in SETTINGS.strategies:
             if s_config.enabled:
-                if s_config.id in strategy_map:
-                    strategy_class = strategy_map[s_config.id]
-                    # Instancie la stratégie avec sa config
-                    instance = strategy_class(
-                        strategy_id=s_config.id,
-                        assets=s_config.assets,
-                        params=s_config.params
-                    )
+                if s_config.id in STRATEGY_MAP:
+                    StrategyClass = STRATEGY_MAP[s_config.id]
+                    # Instanciation de la stratégie avec sa configuration
+                    instance = StrategyClass(config=s_config)
                     self.strategies.append(instance)
-                    print(f"Loaded strategy: {s_config.id}")
-
-    def run(self):
-        # S'abonne au stream de ticks [cite: 159]
-        stream_key = "ticks_stream"
-        last_id = '$' # Écoute seulement les nouveaux messages
+                    print(f"Strategy loaded: {s_config.id}")
+                else:
+                    print(f"WARNING: Strategy {s_config.id} not found in map.")
         
+        if not self.strategies:
+            print("WARNING: No strategies are enabled or loaded.")
+
+    async def run(self):
+        """Boucle principale pour lire les ticks et exécuter les stratégies."""
+        print("--- Démarrage du Strategy Runner ---")
+        
+        # Le Consumer Group et le Consumer ID aident à la résilience avec Redis Streams
+        group_name = "runner_group"
+        consumer_name = "runner_1"
+        
+        try:
+            # Crée le Consumer Group s'il n'existe pas
+            REDIS_CLIENT.xgroup_create(TICKS_STREAM, group_name, id='0', mkstream=True)
+        except redis.exceptions.ResponseError:
+            # Le groupe existe déjà
+            pass
+            
         while True:
-            messages = self.redis.xread({stream_key: last_id}, block=5000)
+            # xreadgroup pour lire de manière sécurisée (le message sera marqué comme "Pending")
+            # block=5000: attend 5 secondes max pour de nouveaux messages
+            messages = REDIS_CLIENT.xreadgroup(
+                groupname=group_name,
+                consumername=consumer_name,
+                streams={TICKS_STREAM: '>'}, # '>' signifie lire les nouveaux messages
+                count=10, 
+                block=5000
+            )
+
             if messages:
-                for _, msg_list in messages:
-                    for msg_id, tick_data in msg_list:
-                        # Dispatcher le tick à toutes les stratégies chargées
+                # Le format de retour de xreadgroup est complexe: [[stream_name, [[id, {data}], ...]], ...]
+                for stream_name, msg_list in messages:
+                    for msg_id, data_dict in msg_list:
+                        # Le tick est encodé en JSON dans la valeur 'data'
+                        tick_data = json.loads(data_dict[b'data'])
+
+                        # Dispatcher le tick aux stratégies
                         for strategy in self.strategies:
-                            # La stratégie filtre elle-même les assets
-                            signal = strategy.on_tick(tick_data)
+                            signal: Optional[Signal] = strategy.on_tick(tick_data)
                             
                             if signal:
-                                # 3. Publier le signal sur le bus [cite: 159]
-                                self.redis.xadd("signals_stream", signal)
-                        
-                        last_id = msg_id
+                                # Publier le signal vers le Risk Engine
+                                REDIS_CLIENT.xadd(SIGNALS_STREAM, {"data": signal.to_json()})
+                                print(f"Signal generated by {strategy.id}: {signal.side} {signal.symbol}")
+
+                        # Marquer le message comme traité (ACK)
+                        REDIS_CLIENT.xack(TICKS_STREAM, group_name, msg_id)
+
+if __name__ == "__main__":
+    import asyncio
+    runner = StrategyRunner()
+    # Le runner utilise asyncio pour lire le stream de manière non bloquante
+    asyncio.run(runner.run())

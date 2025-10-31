@@ -3,7 +3,6 @@
 # Ceci est l'interface que toutes vos stratégies doivent implémenter
 # [cite: 183-187]
 class StrategyBase:
-    
     def __init__(self, strategy_id: str, assets: List[str], params: Dict):
         # Chaque stratégie connaît son identité et sa config
         self.strategy_id = strategy_id

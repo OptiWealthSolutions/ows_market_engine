@@ -1,0 +1,58 @@
+version: "3.8"
+
+services:
+  # Le Bus de Message / Cache (Redis Streams) [cite: 23, 26]
+  redis:
+    image: redis:7-alpine
+    container_name: market_engine_redis
+    ports:
+      - "6379:6379"
+    restart: always
+    command: redis-server --appendonly yes
+
+  # La Base de Données (TimescaleDB pour les séries temporelles) [cite: 22, 38]
+  timescale:
+    image: timescale/timescaledb:latest-pg16
+    container_name: market_engine_timescale
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: trading
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    restart: always
+
+  # Le Connecteur de Données (Worker 1 : Ingestion)
+  data_connector:
+    build: . # Utilise le Dockerfile
+    container_name: market_engine_connector
+    command: python data_connectors/base_connector.py # Le script que nous allons créer
+    depends_on:
+      - redis
+    restart: on-failure
+
+  # Le Strategy Runner (Worker 2 : Calcul des signaux) [cite: 25]
+  strategy_runner:
+    build: .
+    container_name: market_engine_runner
+    command: python core_engine/strategy_runner.py # Le script que nous allons créer
+    depends_on:
+      - redis
+    restart: on-failure
+
+  # L'API Backend (FastAPI pour le Front et les WebSockets) [cite: 29]
+  api:
+    build: .
+    container_name: market_engine_api
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    depends_on:
+      - redis
+      - timescale
+    ports:
+      - "8000:8000"
+    restart: always
+
+volumes:
+  timescaledb_data:

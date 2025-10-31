@@ -1,40 +1,50 @@
-# config/settings.py
 from pydantic import BaseModel
 from typing import List, Dict
 
-# Configuration pour UNE stratégie
-class StrategyConfig(BaseModel):
-    id: str             # Identité (ex: "rsi_mean_revert")
-    enabled: bool = True  # Pour "activer ou non"
-    assets: List[str]   # Les actifs à trader (ex: ["EURUSD", "GBPUSD"])
-    params: Dict         # Hyperparamètres (ex: {"rsi_period": 14})
-    risk_profile: Dict   # ex: {"max_pos_size": 10000, "max_drawdown_pct": 0.05}
+# --- Modèles de Configuration ---
 
-# Configuration globale
-class Settings(BaseModel):
-    redis_host: str = "redis"
-    timescale_db_url: str = "postgresql://user:pass@timescale:5432/trading"
-    mt5_account: int = 12345
-    mt5_password: str = "SECRET"
+class RiskProfile(BaseModel):
+    """Profil de risque spécifique à la stratégie."""
+    max_pos_size: int = 10000        # Taille max de position (pour le sizing)
+    max_drawdown_pct: float = 0.05   # Max drawdown autorisé
+    exposure_limit: int = 50000      # Limite d'exposition totale
     
-    # Liste de toutes les stratégies gérées par le moteur
+# [cite: 7] Paramètres stratégiques (stratégies, hyperparamètres)
+class StrategyConfig(BaseModel):
+    """Configuration et identité pour une stratégie unique."""
+    id: str                         # Identité unique (ex: "rsi_mean_revert")
+    enabled: bool = True            # Activation/Désactivation rapide
+    assets: List[str]               # Actifs que cette stratégie a le droit de trader
+    params: Dict                    # Hyperparamètres spécifiques
+    risk_profile: RiskProfile       # Votre idée d'aversion au risque différente
+
+# [cite: 8] Connexions brokers / comptes
+class Settings(BaseModel):
+    """Configuration Globale de l'Engine."""
+    # Messaging (Bus de signaux)
+    redis_host: str = "redis"
+    redis_port: int = 6379
+    
+    # Database
+    timescale_db_url: str = "postgresql://user:pass@timescale:5432/trading"
+    
+    # Strategy configuration
     strategies: List[StrategyConfig] = [
         StrategyConfig(
             id="rsi_mean_revert",
             enabled=True,
-            assets=["EURUSD"],
-            params={"rsi_period": 14, "buy_threshold": 30},
-            risk_profile={"max_pos_size": 5000}
+            assets=["EURUSD", "GBPUSD"],
+            params={"rsi_period": 14, "buy_threshold": 30, "sell_threshold": 70},
+            risk_profile=RiskProfile(max_pos_size=5000, max_drawdown_pct=0.03)
         ),
         StrategyConfig(
             id="ma_crossover",
-            enabled=False,
-            assets=["EURUSD", "AUDUSD"],
+            enabled=False, # Désactivée par défaut
+            assets=["AUDUSD"],
             params={"short_window": 10, "long_window": 50},
-            risk_profile={"max_pos_size": 10000, "exposure_limit": 50000}
+            risk_profile=RiskProfile(max_pos_size=20000, max_drawdown_pct=0.08)
         ),
     ]
 
-# Instance unique chargée au démarrage
-settings = Settings()
-
+# Instance unique chargée au démarrage de chaque module
+SETTINGS = Settings()
